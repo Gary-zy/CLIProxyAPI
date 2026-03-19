@@ -149,6 +149,11 @@ sync_upstream_if_needed() {
     return 0
   fi
 
+  if git -C "${REPO_DIR}" merge-base --is-ancestor "${UPSTREAM_REMOTE_NAME}/${DEFAULT_BRANCH}" "${DEFAULT_BRANCH}"; then
+    say "本地 ${DEFAULT_BRANCH} 已包含 ${UPSTREAM_REMOTE_NAME}/${DEFAULT_BRANCH}，本次无需同步。"
+    return 0
+  fi
+
   if git_has_tracked_changes; then
     say "仓库里还有已跟踪文件改动，先处理掉再同步上游，别硬拽。"
     git -C "${REPO_DIR}" status --short
