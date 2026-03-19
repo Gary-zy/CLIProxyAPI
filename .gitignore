@@ -1,6 +1,7 @@
 # Binaries
 cli-proxy-api
 *.exe
+cliproxyapi-dx4600pro-amd64.tar
 
 # Configuration
 config.yaml
