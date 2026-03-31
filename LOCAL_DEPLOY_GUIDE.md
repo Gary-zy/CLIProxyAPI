@@ -92,7 +92,7 @@ cd CLIProxyAPI
 cd /你的仓库路径/CLIProxyAPI
 ```
 
-### 4.2 直接启动
+### 4.2 源码模式直接启动
 
 第一次使用时，最简单的命令就是：
 
@@ -107,9 +107,60 @@ cd /你的仓库路径/CLIProxyAPI
 3. 创建本地数据目录
 4. 初始化 `config.yaml`
 5. 生成本地 `docker-compose.local.yml`
-6. 用源码 build 并启动容器
+6. 如果当前是源码模式，先检查 `upstream/main`
+7. 用源码 build 并启动容器
 
-### 4.3 初始化时配置文件从哪里来
+### 4.3 release 包直装模式
+
+如果你只是想稳定部署，不想每次都去合上游代码再本地打包，那就直接走 release 包模式。
+
+对当前这台机器来说：
+
+- 你在 macOS `arm64` 上跑 Docker
+- Docker 里实际跑的是 Linux 容器
+- 所以应该下载的不是 `darwin_arm64`，而是：
+
+```bash
+CLIProxyAPI_<版本>_linux_arm64.tar.gz
+```
+
+推荐流程：
+
+1. 去 release 页面下载对应版本的 `CLIProxyAPI_<版本>_linux_arm64.tar.gz`
+2. 把包放到：
+
+```bash
+~/.config/cliproxyapi-local/packages
+```
+
+3. 然后执行：
+
+```bash
+./scripts/cliproxy-local.sh deploy-package
+```
+
+如果包不在默认目录，也可以直接带路径：
+
+```bash
+./scripts/cliproxy-local.sh deploy-package /你的路径/CLIProxyAPI_<版本>_linux_arm64.tar.gz
+```
+
+脚本会自动做这些事：
+
+1. 解压 release 包
+2. 用包里的二进制生成本地 Docker 镜像
+3. 切换到 `release 包模式`
+4. 重新部署服务
+
+以后你再执行：
+
+```bash
+./scripts/cliproxy-local.sh start
+```
+
+它会继续按当前模式启动；如果你上次部署的是 release 包，它就不会去碰 Git 上游同步。
+
+### 4.4 初始化时配置文件从哪里来
 
 脚本初始化配置时，优先级如下：
 
@@ -122,14 +173,14 @@ cd /你的仓库路径/CLIProxyAPI
 - 如果你以前用过旧版 CLIProxyAPI，脚本会优先复用旧配置
 - 如果没有旧配置，它会从示例配置生成一份新的
 
-### 4.4 第一次启动后的访问地址
+### 4.5 第一次启动后的访问地址
 
 默认访问地址：
 
 - 管理面板：`http://127.0.0.1:8317/management.html`
 - API 根地址：`http://127.0.0.1:8317`
 
-### 4.5 默认管理密码
+### 4.6 默认管理密码
 
 如果你是全新初始化，且没有提供自定义管理密码，脚本默认使用：
 
@@ -175,9 +226,14 @@ CLIPROXY_MANAGEMENT_KEY='你的强密码' ./scripts/cliproxy-local.sh start
 
 - 第一次启动
 - 改完配置后重新拉起
-- 日常启动并顺手检查 upstream 更新
+- 日常启动
 
-`start` 现在会先做一轮 Git 检查：
+`start` 现在是“按当前部署模式启动”：
+
+- 如果当前是源码模式，它会先做一轮 Git 检查
+- 如果当前是 release 包模式，它会直接启动当前已安装的 release 镜像
+
+源码模式下，`start` 会：
 
 1. 检查 `origin` 和 `upstream` remote 是否正确
 2. 当前分支如果是 `main`，先 `fetch upstream`
@@ -196,6 +252,9 @@ CLIPROXY_MANAGEMENT_KEY='你的强密码' ./scripts/cliproxy-local.sh start
 - 本地配置路径
 - 本地认证目录
 - 本地日志目录
+- 当前部署模式
+- 当前 release 包路径 / 版本 / 镜像
+- 推荐下载的 release 包名
 - 当前分支
 - `origin` / `upstream` 地址
 - 相对 `upstream/main` 的 ahead / behind 状态
@@ -230,20 +289,46 @@ CLIPROXY_MANAGEMENT_KEY='你的强密码' ./scripts/cliproxy-local.sh start
 - 先生成配置文件，再慢慢改
 - 只想看本地运行目录落在哪里
 
-### 5.7 更新仓库代码并重建服务
+### 5.7 同步上游并强制重建源码服务
 
 ```bash
 ./scripts/cliproxy-local.sh update
 ```
 
-这条命令会做两件事：
+这条命令现在是“源码模式专用重活”：
 
 1. 检查仓库工作区是否干净
 2. `git fetch upstream`
 3. 同步 `upstream/main`
-4. 按需重建镜像并启动
+4. 不管代码有没有变化，都强制重建镜像并启动
 
-这就是后续最推荐的更新方式。
+如果你当前在 release 包模式，执行 `update` 时，脚本会切回源码模式。
+
+### 5.8 直接重建当前本地源码
+
+```bash
+./scripts/cliproxy-local.sh rebuild
+```
+
+适合：
+
+- 你自己刚改完本地源码
+- 不想拉上游，只想重新打包部署
+
+这条命令不会碰 Git 同步，只会强制本地重建并重新部署。
+
+### 5.9 用本地 release 包重新部署
+
+```bash
+./scripts/cliproxy-local.sh deploy-package
+```
+
+适合：
+
+- 你不想自己合上游代码
+- 你只想下载官方 release 包然后更新
+
+如果默认目录里有多个包，脚本会挑最新那个匹配当前架构的包。
 
 ## 6. Fork 工作流
 
@@ -373,14 +458,15 @@ http://127.0.0.1:8317/management.html
 ### 8.1 认证文件和统计信息不是一回事
 
 - 认证文件是落盘文件，可以迁移和保留
-- 使用统计默认是内存统计，不是天然持久化文件
+- 使用统计只有在 `usage-statistics-enabled: true` 时才会记录
+- 开启后会自动落盘到 `config.yaml` 同目录下的 `usage-statistics.json`
 
 所以：
 
 - 服务不重启时，统计会继续累积
-- 服务重启后，统计通常会重新开始
+- 服务重启后，会自动从 `usage-statistics.json` 恢复
 
-### 8.2 如果你想保留统计
+### 8.2 如果你想迁移统计到别的环境
 
 更新前先导出：
 
@@ -401,7 +487,7 @@ curl -sS -X POST \
   http://127.0.0.1:8317/v0/management/usage/import
 ```
 
-如果你不在乎历史统计，这一步可以跳过。
+如果只是本机重启，一般不用手动导出导入。
 
 ## 10. 修改管理密码
 
@@ -475,7 +561,7 @@ CLIPROXY_PORT_8317=9317 ./scripts/cliproxy-local.sh start
 CLIPROXY_BIND_IP=0.0.0.0 ./scripts/cliproxy-local.sh start
 ```
 
-脚本会把这个绑定地址写进 `runtime.env`，后续 `start / restart / update` 会继续沿用。
+脚本会把这个绑定地址写进 `runtime.env`，后续 `start / restart / update / rebuild / deploy-package` 会继续沿用。
 
 例如同时改多个端口：
 
@@ -491,9 +577,43 @@ CLIPROXY_PORT_1455=2455 \
 http://127.0.0.1:9317/management.html
 ```
 
-## 14. 更新仓库代码的推荐姿势
+## 14. 到底该走 release 包还是源码更新
 
-以后仓库更新，推荐只用这一条：
+这俩方案各有适用场景，但如果你问“哪个更省心”，结论其实挺明确：
+
+- 如果你主要是自己用，想稳定、少折腾，优先走 `release 包直装`
+- 如果你自己还要改代码，或者要跟 fork 工作流混着维护，就继续走 `源码更新`
+
+### 14.1 更推荐的方案：release 包直装
+
+优点：
+
+- 不用先合并上游代码
+- 不用在本地重新编译 Go 项目
+- 更新动作更单纯，出问题也更好定位
+- 你的仓库可以继续留给“改代码”这件事，不跟“部署运行”搅一块
+
+推荐命令：
+
+```bash
+./scripts/cliproxy-local.sh deploy-package
+```
+
+你只需要提前把 release 包放到：
+
+```bash
+~/.config/cliproxyapi-local/packages
+```
+
+### 14.2 什么时候继续用源码更新
+
+下面这些情况，还是源码模式更合适：
+
+- 你本地有自己改过的代码
+- 你需要跟 `origin/upstream` fork 流程一起维护
+- 你想验证自己分支上的变更
+
+对应命令：
 
 ```bash
 ./scripts/cliproxy-local.sh update
@@ -507,15 +627,25 @@ http://127.0.0.1:9317/management.html
 
 这种最容易把现场搞乱。
 
-### 13.1 update 做了什么
+### 14.3 update 做了什么
 
 `update` 会：
 
 1. 检查仓库里是否还有未提交的已跟踪修改
 2. 拉取最新代码
-3. 重新 build 并启动服务
+3. 强制重新 build 并启动服务
 
-### 13.2 update 为什么会检查仓库是否干净
+### 14.4 rebuild 是干啥的
+
+```bash
+./scripts/cliproxy-local.sh rebuild
+```
+
+这条命令不拉上游。
+
+它就是拿你当前本地仓库里的代码，直接重新 build 然后重新部署。
+
+### 14.5 update 为什么会检查仓库是否干净
 
 因为如果你手改了仓库里的 tracked 文件，再 `git pull`，最容易冲突。
 
@@ -603,6 +733,24 @@ CLIPROXY_PORT_8317=9317 ./scripts/cliproxy-local.sh start
 git status
 ```
 
+### 15.6 为什么 deploy-package 提示包不对
+
+最常见就是平台包下错了。
+
+这台机器当前应该下的是：
+
+```bash
+CLIProxyAPI_<版本>_linux_arm64.tar.gz
+```
+
+不是：
+
+- `darwin_arm64`
+- `darwin_amd64`
+- `windows_amd64`
+
+原因不复杂：脚本虽然在 mac 上跑，但服务还是跑在 Docker 里的 Linux 容器里。
+
 ## 16. 推荐使用习惯
 
 推荐就按下面这套来，别东一榔头西一棒子：
@@ -615,19 +763,26 @@ git status
 ./scripts/cliproxy-local.sh status
 ```
 
-### 15.2 代码更新
+### 15.2 纯使用者更新
+
+```bash
+./scripts/cliproxy-local.sh deploy-package
+```
+
+### 15.3 自己维护源码的人更新
 
 ```bash
 ./scripts/cliproxy-local.sh update
+./scripts/cliproxy-local.sh rebuild
 ```
 
-### 15.3 改配置后生效
+### 15.4 改配置后生效
 
 ```bash
 ./scripts/cliproxy-local.sh restart
 ```
 
-### 15.4 尽量不要做的事
+### 15.5 尽量不要做的事
 
 - 不要长期手改仓库里的 `docker-compose.yml`
 - 不要把本地配置文件塞回仓库
@@ -636,7 +791,13 @@ git status
 
 ## 17. 一句话总结
 
-如果你只记一个命令：
+如果你只是想更新运行版本，优先记这个：
+
+```bash
+./scripts/cliproxy-local.sh deploy-package
+```
+
+如果你自己还在跟源码维护，就记这个：
 
 ```bash
 ./scripts/cliproxy-local.sh update

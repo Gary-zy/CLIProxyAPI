@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -125,5 +126,100 @@ func TestDeleteAuthFile_FallbackToAuthDirPath(t *testing.T) {
 	}
 	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
 		t.Fatalf("expected auth file to be removed from auth dir, stat err: %v", errStat)
+	}
+}
+
+func TestDeleteAuthFile_AcceptsAuthIDWithSlash(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	fileName := "codex-user@example.com.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","email":"user@example.com"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "legacy/" + fileName,
+		FileName: fileName,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{
+			"type":  "codex",
+			"email": "user@example.com",
+		},
+	}
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = &memoryAuthStore{}
+
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files?id="+url.QueryEscape(record.ID), nil)
+	ctx.Request = req
+
+	h.DeleteAuthFile(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
+		t.Fatalf("expected auth file to be removed, stat err: %v", errStat)
+	}
+}
+
+func TestDeleteAuthFile_AcceptsAuthIndexInBody(t *testing.T) {
+	t.Setenv("MANAGEMENT_PASSWORD", "")
+	gin.SetMode(gin.TestMode)
+
+	authDir := t.TempDir()
+	fileName := "indexed-user.json"
+	filePath := filepath.Join(authDir, fileName)
+	if errWrite := os.WriteFile(filePath, []byte(`{"type":"codex","email":"indexed@example.com"}`), 0o600); errWrite != nil {
+		t.Fatalf("failed to write auth file: %v", errWrite)
+	}
+
+	manager := coreauth.NewManager(nil, nil, nil)
+	record := &coreauth.Auth{
+		ID:       "codex/indexed-user",
+		FileName: fileName,
+		Provider: "codex",
+		Attributes: map[string]string{
+			"path": filePath,
+		},
+		Metadata: map[string]any{
+			"type":  "codex",
+			"email": "indexed@example.com",
+		},
+	}
+	authIndex := record.EnsureIndex()
+	if _, errRegister := manager.Register(context.Background(), record); errRegister != nil {
+		t.Fatalf("failed to register auth record: %v", errRegister)
+	}
+
+	h := NewHandlerWithoutConfigFilePath(&config.Config{AuthDir: authDir}, manager)
+	h.tokenStore = &memoryAuthStore{}
+
+	body := bytes.NewBufferString(`{"auth_index":"` + authIndex + `"}`)
+	rec := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(rec)
+	req := httptest.NewRequest(http.MethodDelete, "/v0/management/auth-files", body)
+	req.Header.Set("Content-Type", "application/json")
+	ctx.Request = req
+
+	h.DeleteAuthFile(ctx)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected delete status %d, got %d with body %s", http.StatusOK, rec.Code, rec.Body.String())
+	}
+	if _, errStat := os.Stat(filePath); !os.IsNotExist(errStat) {
+		t.Fatalf("expected auth file to be removed, stat err: %v", errStat)
 	}
 }

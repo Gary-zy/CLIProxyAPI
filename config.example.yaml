@@ -59,7 +59,8 @@ logs-max-total-size-mb: 0
 # When exceeded, the oldest error log files are deleted. Default is 10. Set to 0 to disable cleanup.
 error-logs-max-files: 10
 
-# When false, disable in-memory usage statistics aggregation
+# When true, usage statistics are tracked in memory and auto-persisted to
+# usage-statistics.json beside config.yaml so they survive restarts.
 usage-statistics-enabled: false
 
 # Proxy URL. Supports socks5/http/https protocols. Example: socks5://user:pass@192.168.1.1:1080/

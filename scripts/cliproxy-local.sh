@@ -13,11 +13,17 @@ if [[ -f "${RUNTIME_ENV_FILE}" ]]; then
   source "${RUNTIME_ENV_FILE}"
   set +a
 fi
+
 CONFIG_PATH="${BASE_DIR}/config.yaml"
 AUTH_PATH="${BASE_DIR}/auths"
 LOG_PATH="${BASE_DIR}/logs"
 USAGE_EXPORT_PATH="${BASE_DIR}/usage-export.json"
 COMPOSE_OVERRIDE_PATH="${BASE_DIR}/docker-compose.local.yml"
+PACKAGE_DROP_DIR="${BASE_DIR}/packages"
+PACKAGE_WORK_DIR="${BASE_DIR}/package-runtime"
+PACKAGE_EXTRACT_DIR="${PACKAGE_WORK_DIR}/current"
+PACKAGE_DOCKERFILE="${PACKAGE_WORK_DIR}/Dockerfile"
+
 SERVICE_NAME="cli-proxy-api"
 DEFAULT_BRANCH="main"
 ORIGIN_REMOTE_NAME="origin"
@@ -32,10 +38,68 @@ PORT_1455="${CLIPROXY_PORT_1455:-1455}"
 PORT_54545="${CLIPROXY_PORT_54545:-54545}"
 PORT_51121="${CLIPROXY_PORT_51121:-51121}"
 PORT_11451="${CLIPROXY_PORT_11451:-11451}"
+DEPLOY_MODE="${CLIPROXY_DEPLOY_MODE:-source}"
+PACKAGE_ARCHIVE="${CLIPROXY_PACKAGE_ARCHIVE:-}"
+PACKAGE_IMAGE="${CLIPROXY_PACKAGE_IMAGE:-}"
+PACKAGE_VERSION="${CLIPROXY_PACKAGE_VERSION:-}"
+PACKAGE_ASSET_NAME="${CLIPROXY_PACKAGE_ASSET_NAME:-}"
 SYNC_ACTION="no_update"
 
 say() {
-  printf '[cliproxy-local] %s\n' "$*"
+  printf '[cliproxy-local] %s\n' "$*" >&2
+}
+
+shell_escape() {
+  printf '%q' "$1"
+}
+
+abspath() {
+  local target="$1"
+  if [[ -d "${target}" ]]; then
+    (
+      cd "${target}" >/dev/null 2>&1
+      pwd
+    )
+    return 0
+  fi
+
+  (
+    cd "$(dirname "${target}")" >/dev/null 2>&1
+    printf '%s/%s\n' "$(pwd)" "$(basename "${target}")"
+  )
+}
+
+deployment_mode_label() {
+  case "${DEPLOY_MODE}" in
+    package)
+      printf 'release 包部署\n'
+      ;;
+    *)
+      printf '源码构建部署\n'
+      ;;
+  esac
+}
+
+activate_source_mode() {
+  DEPLOY_MODE="source"
+  PACKAGE_ARCHIVE=""
+  PACKAGE_IMAGE=""
+  PACKAGE_VERSION=""
+  PACKAGE_ASSET_NAME=""
+}
+
+compose() {
+  local env_args=("DEPLOY=${DEPLOY_MODE}")
+
+  if [[ "${DEPLOY_MODE}" == "package" ]]; then
+    if [[ -z "${PACKAGE_IMAGE}" ]]; then
+      say "当前是 release 包模式，但还没记录可用镜像。先执行 deploy-package。"
+      return 1
+    fi
+    env_args+=("CLI_PROXY_IMAGE=${PACKAGE_IMAGE}")
+  fi
+
+  env "${env_args[@]}" docker compose -f "${REPO_DIR}/docker-compose.yml" -f "${COMPOSE_OVERRIDE_PATH}" "$@"
 }
 
 management_key_plaintext() {
@@ -44,12 +108,8 @@ management_key_plaintext() {
     return 0
   fi
 
-  if [[ -n "${DEFAULT_MANAGEMENT_KEY:-}" ]]; then
-    printf '%s\n' "${DEFAULT_MANAGEMENT_KEY}"
-    return 0
-  fi
-
-  python3 - "${CONFIG_PATH}" <<'PY'
+  if [[ -f "${CONFIG_PATH}" ]]; then
+    python3 - "${CONFIG_PATH}" <<'PY'
 from pathlib import Path
 import re
 import sys
@@ -74,6 +134,13 @@ if value.startswith("$2"):
 
 print(value)
 PY
+    return 0
+  fi
+
+  if [[ -n "${DEFAULT_MANAGEMENT_KEY:-}" ]]; then
+    printf '%s\n' "${DEFAULT_MANAGEMENT_KEY}"
+    return 0
+  fi
 }
 
 export_usage_statistics() {
@@ -136,20 +203,24 @@ import_usage_statistics() {
 }
 
 usage() {
-  cat <<'EOF'
+  cat <<EOF
 用法：
-  ./scripts/cliproxy-local.sh start    启动前检查 upstream 更新，必要时同步并重建
-  ./scripts/cliproxy-local.sh update   显式同步 upstream 更新并重建服务
-  ./scripts/cliproxy-local.sh stop     停止服务
-  ./scripts/cliproxy-local.sh restart  重启服务
-  ./scripts/cliproxy-local.sh logs     查看服务日志
-  ./scripts/cliproxy-local.sh status   查看服务状态、本地路径和 Git 同步状态
-  ./scripts/cliproxy-local.sh init     只初始化本地目录和配置
-EOF
-}
+  ./scripts/cliproxy-local.sh start                    启动当前部署模式；源码模式会先检查 upstream
+  ./scripts/cliproxy-local.sh update                   同步 upstream，强制重建源码镜像并重新部署
+  ./scripts/cliproxy-local.sh rebuild                  不拉上游，直接用当前本地源码强制重建部署
+  ./scripts/cliproxy-local.sh deploy-package [PATH]    用本地 release 包构建镜像并部署
+  ./scripts/cliproxy-local.sh stop                     停止服务
+  ./scripts/cliproxy-local.sh restart                  重启服务
+  ./scripts/cliproxy-local.sh logs                     查看服务日志
+  ./scripts/cliproxy-local.sh status                   查看服务状态、本地路径、部署模式和 Git 同步状态
+  ./scripts/cliproxy-local.sh init                     只初始化本地目录和配置
 
-compose() {
-  docker compose -f "${REPO_DIR}/docker-compose.yml" -f "${COMPOSE_OVERRIDE_PATH}" "$@"
+release 包目录：
+  ${PACKAGE_DROP_DIR}
+
+当前 Docker 模式推荐下载：
+  $(recommended_package_name 2>/dev/null || printf 'CLIProxyAPI_<版本>_linux_amd64.tar.gz')
+EOF
 }
 
 wait_for_docker() {
@@ -176,7 +247,7 @@ ensure_docker() {
 }
 
 ensure_dirs() {
-  mkdir -p "${BASE_DIR}" "${AUTH_PATH}" "${LOG_PATH}"
+  mkdir -p "${BASE_DIR}" "${AUTH_PATH}" "${LOG_PATH}" "${PACKAGE_DROP_DIR}" "${PACKAGE_WORK_DIR}"
 }
 
 git_current_branch() {
@@ -280,15 +351,20 @@ sync_upstream_if_needed() {
 }
 
 write_runtime_env() {
-  cat > "${RUNTIME_ENV_FILE}" <<EOF
-CLIPROXY_BIND_IP=${BIND_IP}
-CLIPROXY_PORT_8317=${PORT_8317}
-CLIPROXY_PORT_8085=${PORT_8085}
-CLIPROXY_PORT_1455=${PORT_1455}
-CLIPROXY_PORT_54545=${PORT_54545}
-CLIPROXY_PORT_51121=${PORT_51121}
-CLIPROXY_PORT_11451=${PORT_11451}
-EOF
+  {
+    printf 'CLIPROXY_BIND_IP=%s\n' "$(shell_escape "${BIND_IP}")"
+    printf 'CLIPROXY_PORT_8317=%s\n' "$(shell_escape "${PORT_8317}")"
+    printf 'CLIPROXY_PORT_8085=%s\n' "$(shell_escape "${PORT_8085}")"
+    printf 'CLIPROXY_PORT_1455=%s\n' "$(shell_escape "${PORT_1455}")"
+    printf 'CLIPROXY_PORT_54545=%s\n' "$(shell_escape "${PORT_54545}")"
+    printf 'CLIPROXY_PORT_51121=%s\n' "$(shell_escape "${PORT_51121}")"
+    printf 'CLIPROXY_PORT_11451=%s\n' "$(shell_escape "${PORT_11451}")"
+    printf 'CLIPROXY_DEPLOY_MODE=%s\n' "$(shell_escape "${DEPLOY_MODE}")"
+    printf 'CLIPROXY_PACKAGE_ARCHIVE=%s\n' "$(shell_escape "${PACKAGE_ARCHIVE}")"
+    printf 'CLIPROXY_PACKAGE_IMAGE=%s\n' "$(shell_escape "${PACKAGE_IMAGE}")"
+    printf 'CLIPROXY_PACKAGE_VERSION=%s\n' "$(shell_escape "${PACKAGE_VERSION}")"
+    printf 'CLIPROXY_PACKAGE_ASSET_NAME=%s\n' "$(shell_escape "${PACKAGE_ASSET_NAME}")"
+  } > "${RUNTIME_ENV_FILE}"
 }
 
 dir_has_files() {
@@ -481,6 +557,164 @@ ensure_clean_repo_for_update() {
   fi
 }
 
+platform_package_suffix() {
+  case "$(uname -m)" in
+    arm64|aarch64)
+      printf 'linux_arm64\n'
+      ;;
+    x86_64|amd64)
+      printf 'linux_amd64\n'
+      ;;
+    *)
+      say "当前机器架构 $(uname -m) 还没在脚本里登记，先手工挑对应的 linux release 包。"
+      return 1
+      ;;
+  esac
+}
+
+recommended_package_name() {
+  local suffix
+  suffix="$(platform_package_suffix)" || return 1
+  printf 'CLIProxyAPI_<版本>_%s.tar.gz\n' "${suffix}"
+}
+
+find_latest_package_archive() {
+  local suffix latest=""
+  local -a matches=()
+
+  suffix="$(platform_package_suffix)" || return 1
+  shopt -s nullglob
+  matches=("${PACKAGE_DROP_DIR}"/CLIProxyAPI_*_"${suffix}".tar.gz)
+  shopt -u nullglob
+
+  if (( ${#matches[@]} == 0 )); then
+    say "没在 ${PACKAGE_DROP_DIR} 找到匹配的 release 包。"
+    say "你先下载 ${PACKAGE_DROP_DIR}/$(recommended_package_name)"
+    return 1
+  fi
+
+  latest="${matches[0]}"
+  for archive in "${matches[@]}"; do
+    if [[ "${archive}" -nt "${latest}" ]]; then
+      latest="${archive}"
+    fi
+  done
+
+  printf '%s\n' "${latest}"
+}
+
+resolve_package_archive() {
+  local input="${1:-}"
+  local archive_path
+
+  if [[ -n "${input}" ]]; then
+    if [[ ! -f "${input}" ]]; then
+      say "指定的 release 包不存在：${input}"
+      return 1
+    fi
+    archive_path="$(abspath "${input}")"
+  else
+    archive_path="$(find_latest_package_archive)"
+  fi
+
+  printf '%s\n' "${archive_path}"
+}
+
+build_package_image_from_archive() {
+  local archive_path="$1"
+  local asset_name version asset_suffix expected_suffix safe_version image_tag tmpdir
+
+  asset_name="$(basename "${archive_path}")"
+  expected_suffix="$(platform_package_suffix)" || return 1
+
+  if [[ ! "${asset_name}" =~ ^CLIProxyAPI_(.+)_(linux_(amd64|arm64))\.tar\.gz$ ]]; then
+    say "release 包文件名不对：${asset_name}"
+    say "应该长这样：$(recommended_package_name)"
+    return 1
+  fi
+
+  version="${BASH_REMATCH[1]}"
+  asset_suffix="${BASH_REMATCH[2]}"
+  if [[ "${asset_suffix}" != "${expected_suffix}" ]]; then
+    say "你这个包是 ${asset_suffix}，跟当前 Docker 运行架构 ${expected_suffix} 对不上。"
+    say "重新下载：$(recommended_package_name)"
+    return 1
+  fi
+
+  tmpdir="$(mktemp -d "${BASE_DIR}/package-extract.XXXXXX")"
+  tar -xzf "${archive_path}" -C "${tmpdir}"
+
+  if [[ ! -f "${tmpdir}/cli-proxy-api" ]]; then
+    rm -rf "${tmpdir}"
+    say "release 包里没找到 cli-proxy-api 可执行文件，先别往下硬整。"
+    return 1
+  fi
+  chmod +x "${tmpdir}/cli-proxy-api"
+
+  if [[ ! -f "${tmpdir}/config.example.yaml" ]]; then
+    cp "${REPO_DIR}/config.example.yaml" "${tmpdir}/config.example.yaml"
+  fi
+
+  rm -rf "${PACKAGE_EXTRACT_DIR}"
+  mkdir -p "${PACKAGE_WORK_DIR}"
+  mv "${tmpdir}" "${PACKAGE_EXTRACT_DIR}"
+
+  cat > "${PACKAGE_DOCKERFILE}" <<'EOF'
+FROM docker.io/library/alpine:3.22.0
+
+RUN apk add --no-cache tzdata
+
+RUN mkdir /CLIProxyAPI
+
+COPY cli-proxy-api /CLIProxyAPI/CLIProxyAPI
+COPY config.example.yaml /CLIProxyAPI/config.example.yaml
+
+WORKDIR /CLIProxyAPI
+
+EXPOSE 8317 8085 1455 54545 51121 11451
+
+ENV TZ=Asia/Shanghai
+
+RUN cp /usr/share/zoneinfo/${TZ} /etc/localtime && \
+    echo "${TZ}" > /etc/timezone && \
+    chmod +x /CLIProxyAPI/CLIProxyAPI
+
+CMD ["./CLIProxyAPI"]
+EOF
+
+  safe_version="$(printf '%s' "${version}" | tr -cs 'A-Za-z0-9_.-' '-')"
+  image_tag="cliproxy-local-package:${safe_version}-${asset_suffix}"
+
+  say "开始用 release 包构建本地镜像：${image_tag}"
+  docker build -t "${image_tag}" -f "${PACKAGE_DOCKERFILE}" "${PACKAGE_EXTRACT_DIR}"
+
+  DEPLOY_MODE="package"
+  PACKAGE_ARCHIVE="${archive_path}"
+  PACKAGE_IMAGE="${image_tag}"
+  PACKAGE_VERSION="${version}"
+  PACKAGE_ASSET_NAME="${asset_name}"
+}
+
+ensure_package_mode_ready() {
+  if [[ "${DEPLOY_MODE}" != "package" ]]; then
+    return 0
+  fi
+
+  if [[ -z "${PACKAGE_IMAGE}" ]]; then
+    say "当前记录的是 release 包模式，但没找到镜像信息。你先跑一把 deploy-package。"
+    return 1
+  fi
+}
+
+ensure_package_image_available() {
+  ensure_package_mode_ready || return 1
+
+  if ! docker image inspect "${PACKAGE_IMAGE}" >/dev/null 2>&1; then
+    say "本地镜像 ${PACKAGE_IMAGE} 不在了。你重新执行 deploy-package 就行。"
+    return 1
+  fi
+}
+
 print_git_status_summary() {
   if ! ensure_git_repo >/dev/null 2>&1; then
     return 0
@@ -508,10 +742,24 @@ Git 状态：
 EOF
 }
 
+print_deploy_status_summary() {
+  cat <<EOF
+部署状态：
+  当前模式：$(deployment_mode_label)
+  release 包目录：${PACKAGE_DROP_DIR}
+  推荐下载包：$(recommended_package_name 2>/dev/null || printf 'CLIProxyAPI_<版本>_linux_amd64.tar.gz')
+  当前 release 包：${PACKAGE_ARCHIVE:-<none>}
+  当前 release 版本：${PACKAGE_VERSION:-<none>}
+  当前镜像：${PACKAGE_IMAGE:-<源码模式由 docker compose 本地 build>}
+EOF
+}
+
 show_status() {
   prepare_local_runtime
   if docker info >/dev/null 2>&1; then
-    compose ps
+    if [[ "${DEPLOY_MODE}" != "package" ]] || ensure_package_mode_ready; then
+      compose ps || true
+    fi
   else
     say "Docker 还没启动，先看本地路径信息。"
   fi
@@ -525,6 +773,8 @@ show_status() {
   override 文件：${COMPOSE_OVERRIDE_PATH}
   运行态环境：${RUNTIME_ENV_FILE}
 
+$(print_deploy_status_summary)
+
 $(print_git_status_summary)
 
 访问地址：
@@ -537,12 +787,19 @@ EOF
 start_service() {
   ensure_docker
   prepare_local_runtime
-  sync_upstream_if_needed
-  if [[ "${SYNC_ACTION}" == "updated" ]]; then
-    compose up -d --build --remove-orphans
+
+  if [[ "${DEPLOY_MODE}" == "package" ]]; then
+    ensure_package_image_available || exit 1
+    compose up -d --no-build --remove-orphans
   else
-    compose up -d --remove-orphans
+    sync_upstream_if_needed
+    if [[ "${SYNC_ACTION}" == "updated" ]]; then
+      compose up -d --build --remove-orphans
+    else
+      compose up -d --remove-orphans
+    fi
   fi
+
   import_usage_statistics
   show_status
 }
@@ -551,7 +808,9 @@ stop_service() {
   ensure_docker
   prepare_local_runtime
   export_usage_statistics
-  compose down
+  if [[ "${DEPLOY_MODE}" != "package" ]] || ensure_package_mode_ready; then
+    compose down
+  fi
 }
 
 restart_service() {
@@ -562,20 +821,51 @@ restart_service() {
 logs_service() {
   ensure_docker
   prepare_local_runtime
+  if [[ "${DEPLOY_MODE}" == "package" ]]; then
+    ensure_package_mode_ready || exit 1
+  fi
   compose logs -f --tail=200 "${SERVICE_NAME}"
 }
 
 update_service() {
+  if [[ "${DEPLOY_MODE}" == "package" ]]; then
+    say "这次 `update` 会切回源码模式，走 upstream 同步 + 本地重建。"
+  fi
+  activate_source_mode
   ensure_clean_repo_for_update
   ensure_docker
   prepare_local_runtime
   export_usage_statistics
   sync_upstream_if_needed
-  if [[ "${SYNC_ACTION}" == "updated" ]]; then
-    compose up -d --build --remove-orphans
-  else
-    compose up -d --remove-orphans
+  compose up -d --build --remove-orphans
+  import_usage_statistics
+  show_status
+}
+
+rebuild_service() {
+  if [[ "${DEPLOY_MODE}" == "package" ]]; then
+    say "这次 `rebuild` 会切回源码模式，直接拿你当前本地代码重建。"
   fi
+  activate_source_mode
+  ensure_docker
+  prepare_local_runtime
+  export_usage_statistics
+  compose up -d --build --remove-orphans
+  import_usage_statistics
+  show_status
+}
+
+deploy_package_service() {
+  local archive_path
+
+  ensure_docker
+  prepare_local_runtime
+  archive_path="$(resolve_package_archive "${1:-}")"
+  export_usage_statistics
+  build_package_image_from_archive "${archive_path}"
+  write_runtime_env
+  write_override
+  compose up -d --no-build --remove-orphans
   import_usage_statistics
   show_status
 }
@@ -586,8 +876,14 @@ main() {
     start)
       start_service
       ;;
-    update)
+    update|update-source)
       update_service
+      ;;
+    rebuild|rebuild-source)
+      rebuild_service
+      ;;
+    deploy-package|package)
+      deploy_package_service "${2:-}"
       ;;
     stop)
       stop_service

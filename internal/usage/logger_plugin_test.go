@@ -2,6 +2,7 @@ package usage
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -92,5 +93,50 @@ func TestRequestStatisticsMergeSnapshotDedupIgnoresLatency(t *testing.T) {
 	details := snapshot.APIs["test-key"].Models["gpt-5.4"].Details
 	if len(details) != 1 {
 		t.Fatalf("details len = %d, want 1", len(details))
+	}
+}
+
+func TestRequestStatisticsPersistenceRoundTrip(t *testing.T) {
+	filePath := filepath.Join(t.TempDir(), "usage-statistics.json")
+	first := NewRequestStatistics()
+	if err := first.EnablePersistence(filePath); err != nil {
+		t.Fatalf("EnablePersistence() error = %v", err)
+	}
+
+	timestamp := time.Date(2026, 3, 20, 12, 30, 0, 0, time.UTC)
+	first.Record(context.Background(), coreusage.Record{
+		APIKey:      "persist-key",
+		Model:       "gpt-5.4",
+		RequestedAt: timestamp,
+		Latency:     2 * time.Second,
+		Detail: coreusage.Detail{
+			InputTokens:  12,
+			OutputTokens: 34,
+			TotalTokens:  46,
+		},
+	})
+
+	if err := first.FlushPersistence(); err != nil {
+		t.Fatalf("FlushPersistence() error = %v", err)
+	}
+
+	second := NewRequestStatistics()
+	if err := second.EnablePersistence(filePath); err != nil {
+		t.Fatalf("EnablePersistence() reload error = %v", err)
+	}
+
+	snapshot := second.Snapshot()
+	if snapshot.TotalRequests != 1 {
+		t.Fatalf("total_requests = %d, want 1", snapshot.TotalRequests)
+	}
+	if snapshot.TotalTokens != 46 {
+		t.Fatalf("total_tokens = %d, want 46", snapshot.TotalTokens)
+	}
+	details := snapshot.APIs["persist-key"].Models["gpt-5.4"].Details
+	if len(details) != 1 {
+		t.Fatalf("details len = %d, want 1", len(details))
+	}
+	if !details[0].Timestamp.Equal(timestamp) {
+		t.Fatalf("timestamp = %s, want %s", details[0].Timestamp, timestamp)
 	}
 }

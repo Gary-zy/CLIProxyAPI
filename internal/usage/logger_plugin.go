@@ -71,6 +71,8 @@ type RequestStatistics struct {
 	requestsByHour map[int]int64
 	tokensByDay    map[string]int64
 	tokensByHour   map[int]int64
+
+	persist *statisticsPersistence
 }
 
 // apiStats holds aggregated metrics for a single API key.
@@ -148,6 +150,7 @@ func NewRequestStatistics() *RequestStatistics {
 		requestsByHour: make(map[int]int64),
 		tokensByDay:    make(map[string]int64),
 		tokensByHour:   make(map[int]int64),
+		persist:        newStatisticsPersistence(),
 	}
 }
 
@@ -182,7 +185,10 @@ func (s *RequestStatistics) Record(ctx context.Context, record coreusage.Record)
 	hourKey := timestamp.Hour()
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	defer func() {
+		s.mu.Unlock()
+		s.markDirty()
+	}()
 
 	s.totalRequests++
 	if success {
@@ -298,7 +304,13 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	persistChanges := false
+	defer func() {
+		s.mu.Unlock()
+		if persistChanges {
+			s.markDirty()
+		}
+	}()
 
 	seen := make(map[string]struct{})
 	for apiName, stats := range s.apis {
@@ -348,6 +360,7 @@ func (s *RequestStatistics) MergeSnapshot(snapshot StatisticsSnapshot) MergeResu
 				seen[key] = struct{}{}
 				s.recordImported(apiName, modelName, stats, detail)
 				result.Added++
+				persistChanges = true
 			}
 		}
 	}
@@ -481,4 +494,11 @@ func formatHour(hour int) string {
 	}
 	hour = hour % 24
 	return fmt.Sprintf("%02d", hour)
+}
+
+func (s *RequestStatistics) markDirty() {
+	if s == nil || s.persist == nil {
+		return
+	}
+	s.persist.schedule(s)
 }
